@@ -231,15 +231,15 @@ class TurnstileAPIServer:
                         pass
                     await asyncio.sleep(1)
 
-                # Wait for the download form to appear (Vimm's renders it via JS)
+                # Wait for page to finish loading after Turnstile submit/redirect
                 dl_post_start = time.time()
                 page_content = ""
                 while time.time() - dl_post_start < 30:
                     await asyncio.sleep(2)
                     page_content = await page.content()
                     try:
-                        has_dl = await page.query_selector("#dl-form [name=mediaId]")
-                        if has_dl:
+                        ready = await page.evaluate("() => document.readyState === 'complete'")
+                        if ready:
                             break
                     except Exception:
                         pass
