@@ -231,14 +231,18 @@ class TurnstileAPIServer:
                         pass
                     await asyncio.sleep(1)
 
-                # Wait for download links to load (Vimm's injects them via JS)
+                # Wait for the download form to appear (Vimm's renders it via JS)
                 dl_post_start = time.time()
                 page_content = ""
                 while time.time() - dl_post_start < 30:
                     await asyncio.sleep(2)
                     page_content = await page.content()
-                    if "/download/" in page_content:
-                        break
+                    try:
+                        has_dl = await page.query_selector("#dl-form [name=mediaId]")
+                        if has_dl:
+                            break
+                    except Exception:
+                        pass
 
                 elapsed_time = round(time.time() - start_time, 3)
 
