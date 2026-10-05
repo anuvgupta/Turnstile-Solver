@@ -95,51 +95,89 @@ class AsyncTurnstileSolver:
             self.browser_args.append(f"--user-agent={useragent}")
 
     async def _setup_page(self, browser, url: str, sitekey: str, action: str = None, cdata: str = None):
-        """Set up the page with Turnstile widget."""
+        """Set up the page and navigate to the target URL."""
         if self.browser_type == "chrome":
             page = browser.pages[0]
         else:
             page = await browser.new_page()
 
-        url_with_slash = url + "/" if not url.endswith("/") else url
-
-        turnstile_div = f'<div class="cf-turnstile" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
-        page_data = self.HTML_TEMPLATE.replace("<!-- cf turnstile -->", turnstile_div)
-
         if self.debug:
             logger.debug(f"Starting Turnstile solve for URL: {url} with Sitekey: {sitekey}")
 
-        await page.route(url_with_slash, lambda route: route.fulfill(body=page_data, status=200))
-        await page.goto(url_with_slash)
+        await page.goto(url)
 
         return page
 
     async def _get_turnstile_response(self, page, max_attempts: int = 10) -> Optional[str]:
-        """Attempt to retrieve Turnstile response."""
-        for _ in range(max_attempts):
+        """Attempt to retrieve Turnstile response from the real page."""
+        for attempt in range(max_attempts):
             if self.debug:
-                logger.debug(f"Attempt {_ + 1}: No Turnstile response yet.")
+                logger.debug(f"Attempt {attempt + 1}: No Turnstile response yet.")
 
             try:
                 turnstile_check = await page.input_value("[name=cf-turnstile-response]")
                 if turnstile_check == "":
-
                     await page.click("//div[@class='cf-turnstile']", timeout=3000)
                     await asyncio.sleep(0.5)
                 else:
-                    element = await page.query_selector("[name=cf-turnstile-response]")
-                    if element:
-                        turnstile_element = await page.query_selector("[name=cf-turnstile-response]")
+                    turnstile_element = await page.query_selector("[name=cf-turnstile-response]")
+                    if turnstile_element:
                         return await turnstile_element.get_attribute("value")
                     break
-            except:
+            except Exception:
                 pass
 
         return None
 
+    async def _wait_for_turnstile_callback(self, page, timeout: int = 40) -> dict:
+        """Wait for Turnstile callback to fire and the page to update.
+
+        When Turnstile is solved on a real page with an embedded form, the
+        callback typically submits the form and the page reloads.  We detect
+        either the cf-turnstile-response input getting a value, or the
+        challenge element disappearing (form submitted, page reloaded).
+        Returns a dict with page_content and turnstile_value.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                token = await page.input_value("[name=cf-turnstile-response]")
+                if token:
+                    await asyncio.sleep(2)
+                    content = await page.content()
+                    return {"page_content": content, "turnstile_value": token}
+            except Exception:
+                pass
+
+            try:
+                has_challenge = await page.query_selector(".cf-turnstile")
+                if not has_challenge:
+                    content = await page.content()
+                    token_value = await page.evaluate(
+                        "document.querySelector('input[name=\"cf-turnstile-response\"]')?.value || ''"
+                    )
+                    return {"page_content": content, "turnstile_value": token_value or None}
+            except Exception:
+                pass
+
+            await asyncio.sleep(1)
+
+        try:
+            content = await page.content()
+        except Exception:
+            content = None
+        return {"page_content": content, "turnstile_value": None}
+
     async def solve(self, url: str, sitekey: str, action: str = None, cdata: str = None):
         """
-        Solve the Turnstile challenge and return the result.
+        Solve the Turnstile challenge directly on the target page and return
+        the token along with the rendered page content after form submission.
+
+        Unlike the upstream, this navigates to the real page instead of
+        creating a synthetic local page.  This preserves the origin context
+        that Cloudflare validates, allowing tokens to work for embedded
+        Turnstile widgets that submit a form (e.g. login flows, gated content
+        behind a Turnstile challenge).
         """
         start_time = time.time()
         if self.browser_type in ["chromium", "chrome", "msedge"]:
@@ -148,13 +186,21 @@ class AsyncTurnstileSolver:
                 headless=self.headless,
                 args=self.browser_args
             )
-
         elif self.browser_type == "camoufox":
             browser = await AsyncCamoufox(headless=self.headless).start()
+
+        page_content = None
+        turnstile_value = None
 
         try:
             page = await self._setup_page(browser, url, sitekey, action, cdata)
             turnstile_value = await self._get_turnstile_response(page)
+
+            if turnstile_value:
+                callback_result = await self._wait_for_turnstile_callback(page)
+                page_content = callback_result.get("page_content")
+                if not turnstile_value:
+                    turnstile_value = callback_result.get("turnstile_value")
 
             elapsed_time = round(time.time() - start_time, 3)
 
@@ -176,19 +222,19 @@ class AsyncTurnstileSolver:
 
         finally:
             await browser.close()
-            if self.browser_type == "chrome" or self.browser_type == "chromium":
+            if self.browser_type in ("chrome", "chromium", "msedge"):
                 await playwright.stop()
             else:
                 try:
                     await browser.stop()
-                except:
+                except Exception:
                     pass
 
             if self.debug:
                 logger.debug(f"Elapsed time: {result.elapsed_time_seconds} seconds")
                 logger.debug("Browser closed. Returning result.")
 
-        return result
+        return result, page_content
 
 
 async def get_turnstile_token(url: str, sitekey: str, action: str = None, cdata: str = None, debug: bool = False, headless: bool = False, useragent: str = None, browser_type: str = "chromium"):
@@ -205,8 +251,11 @@ async def get_turnstile_token(url: str, sitekey: str, action: str = None, cdata:
         logger.error(f"You must specify a {COLORS.get('YELLOW')}User-Agent{COLORS.get('RESET')} for Turnstile Solver or use {COLORS.get('GREEN')}camoufox{COLORS.get('RESET')} without useragent")
     else:
         solver = AsyncTurnstileSolver(debug=debug, useragent=useragent, headless=headless, browser_type=browser_type)
-        result = await solver.solve(url=url, sitekey=sitekey, action=action, cdata=cdata)
-        return result.__dict__
+        result, page_content = await solver.solve(url=url, sitekey=sitekey, action=action, cdata=cdata)
+        result_dict = result.__dict__
+        if page_content:
+            result_dict["page_content"] = page_content
+        return result_dict
 
 
 if __name__ == "__main__":
