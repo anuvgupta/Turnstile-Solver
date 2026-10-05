@@ -33,7 +33,11 @@ RUN apt-get update && \
     xfce4-terminal \
     python3-pip \
     ca-certificates \
-    xvfb
+    xvfb \
+    fonts-liberation \
+    fonts-noto \
+    fonts-dejavu \
+    fonts-freefont-ttf
 
 RUN apt remove -y light-locker xscreensaver && \
     apt autoremove -y && \
