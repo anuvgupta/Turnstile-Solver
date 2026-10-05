@@ -143,12 +143,13 @@ docker run -d -p 3389:3389 -p 5000:5000 -e TZ=Asia/Baku --name turnstile_solver 
   GET /turnstile?url=https://example.com&sitekey=0x4AAAAAAA
 ```
 #### Request Parameters:
-| Parameter  | Type    | Description                                                                 | Required |
-|------------|---------|-----------------------------------------------------------------------------|----------|
-| `url`      | string  | The target URL containing the CAPTCHA. (e.g., `https://example.com`) | Yes      |
-| `sitekey`  | string  | The site key for the CAPTCHA to be solved. (e.g., `0x4AAAAAAA`) | Yes      |
-| `action`   | string  | Action to trigger during CAPTCHA solving, e.g., `login`            | No       |
-| `cdata`    | string  | Custom data that can be used for additional CAPTCHA parameters.    | No       |
+| Parameter       | Type    | Description                                                                 | Required |
+|-----------------|---------|-----------------------------------------------------------------------------|----------|
+| `url`           | string  | The target URL containing the CAPTCHA. (e.g., `https://example.com`) | Yes      |
+| `sitekey`       | string  | The site key for the CAPTCHA to be solved. (e.g., `0x4AAAAAAA`) | Yes      |
+| `action`        | string  | Action to trigger during CAPTCHA solving, e.g., `login`            | No       |
+| `cdata`         | string  | Custom data that can be used for additional CAPTCHA parameters.    | No       |
+| `wait_selector` | string  | CSS selector to wait for after solving (e.g., `#dl-form [name=mediaId]`) | No       |
 
 #### Response:
 
@@ -178,9 +179,87 @@ If the CAPTCHA is solved successfully, the server will respond with the followin
 ```json
 {
   "elapsed_time": 7.625,
-  "value": "0.KBtT-r"
+  "value": "0.KBtT-r",
+  "page_content": "<!DOCTYPE html>...full page HTML..."
 }
 ```
+
+---
+
+## 🍴 Fork Changes
+
+This fork (`anuvgupta/Turnstile-Solver`) makes several changes from upstream
+that are needed when the target site validates Turnstile token origin or
+requires the resulting page content.
+
+### Key Differences
+
+| Feature | Upstream | This Fork |
+|---------|----------|-----------|
+| Navigation | Synthetic local page with embedded widget | Real target URL |
+| Token origin | `localhost` token (rejected by origin-validating sites) | Real-page origin (valid) |
+| Response | Token only (`value`) | Token + full page HTML (`page_content`) |
+| Browser | Patchright + Chrome/Chromium | Camoufox with anti-detection config |
+| Post-solve wait | No wait | Waits for page to reload after Turnstile callback |
+
+### Why These Changes
+
+Upstream creates a fake HTML page, embeds the Turnstile widget with the
+target's sitekey, and extracts a token from localhost. Many sites validate
+that the token's origin matches the page hostname — a localhost token with
+the right sitekey gets rejected.
+
+This fork navigates to the real URL. After the Turnstile auto-resolves,
+the page's callback (typically a form POST) fires and the page reloads with
+the actual content. The solver waits for this reload and captures the full
+HTML, so the caller can parse it directly without a second request.
+
+### Camoufox Anti-Detection
+
+Upstream uses Patchright (patched `navigator.webdriver` only). Cloudflare
+Turnstile has additional fingerprint vectors: WebGL renderer, font enumeration,
+browser fingerprint consistency.
+
+This fork runs Camoufox (Firefox fork) with:
+- `humanize=True` — injects mouse movements, timing delays
+- `geoip=True` — matches timezone/locale/screen to IP geolocation
+- Headed via Xvfb (`headless=False`)
+- 317 fonts (added to Docker image)
+
+### API Additions
+
+**`wait_selector` parameter** (optional):
+```
+GET /turnstile?url=...&sitekey=...&wait_selector=%23dl-form%20%5Bname%3DmediaId%5D
+```
+If provided, the solver polls for this CSS selector to appear after Turnstile
+solves (configurable per-site wait for dynamic content). Falls back to
+`document.readyState === 'complete'` if omitted.
+
+**`page_content` in response:**
+```json
+{
+  "elapsed_time": 6.914,
+  "value": "1.NJ9RMBppXF...",
+  "page_content": "<!DOCTYPE html>...<title>The Vault: Crazy Machines (Wii)</title>..."
+}
+```
+
+### Docker Compose
+
+```yaml
+services:
+  turnstile-solver:
+    build:
+      context: .
+      dockerfile: Docker/Dockerfile
+    environment:
+      - RUN_API_SOLVER=true
+      - TZ=America/Chicago
+```
+
+Startup auto-fetches Camoufox browser. No exposed ports needed — the solver
+only needs to be reachable on the compose network.
 
 ---
 
