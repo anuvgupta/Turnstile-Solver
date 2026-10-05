@@ -159,7 +159,7 @@ class TurnstileAPIServer:
         logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
 
 
-    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None):
+    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None, wait_selector: str = None):
         """Solve the Turnstile challenge directly on the target page.
 
         Unlike the upstream solver, this navigates to the real page instead of
@@ -167,6 +167,9 @@ class TurnstileAPIServer:
         that Cloudflare validates, and also waits for the page to update after
         the Turnstile callback fires (e.g. a form submission), capturing the
         resulting page content.
+
+        Optional wait_selector: CSS selector to wait for after Turnstile solves,
+        for page-specific dynamic content. Falls back to document.readyState.
         """
         proxy = None
 
@@ -234,15 +237,26 @@ class TurnstileAPIServer:
                 # Wait for page to finish loading after Turnstile submit/redirect
                 dl_post_start = time.time()
                 page_content = ""
-                while time.time() - dl_post_start < 30:
-                    await asyncio.sleep(2)
-                    page_content = await page.content()
-                    try:
-                        ready = await page.evaluate("() => document.readyState === 'complete'")
-                        if ready:
-                            break
-                    except Exception:
-                        pass
+                if wait_selector:
+                    while time.time() - dl_post_start < 30:
+                        await asyncio.sleep(2)
+                        page_content = await page.content()
+                        try:
+                            el = await page.query_selector(wait_selector)
+                            if el:
+                                break
+                        except Exception:
+                            pass
+                else:
+                    while time.time() - dl_post_start < 30:
+                        await asyncio.sleep(2)
+                        page_content = await page.content()
+                        try:
+                            ready = await page.evaluate("() => document.readyState === 'complete'")
+                            if ready:
+                                break
+                        except Exception:
+                            pass
 
                 elapsed_time = round(time.time() - start_time, 3)
 
@@ -277,6 +291,7 @@ class TurnstileAPIServer:
         sitekey = request.args.get('sitekey')
         action = request.args.get('action')
         cdata = request.args.get('cdata')
+        wait_selector = request.args.get('wait_selector')
 
         if not url or not sitekey:
             return jsonify({
@@ -288,7 +303,7 @@ class TurnstileAPIServer:
         self.results[task_id] = "CAPTCHA_NOT_READY"
 
         try:
-            asyncio.create_task(self._solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata))
+            asyncio.create_task(self._solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata, wait_selector=wait_selector))
 
             if self.debug:
                 logger.debug(f"Request completed with taskid {task_id}.")
