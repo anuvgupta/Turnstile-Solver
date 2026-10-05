@@ -70,5 +70,8 @@ start_xrdp_services
 
 if [ "$RUN_API_SOLVER" = "true" ]; then
     echo "Starting API solver in headful mode..."
-    xvfb-run -a python3 /app/api_solver.py --browser_type chrome --host 0.0.0.0
+    export DISPLAY=:99
+    Xvfb $DISPLAY -screen 0 1920x1080x24 &>/dev/null &
+    sleep 1
+    python3 /app/api_solver.py --browser_type chrome --host 0.0.0.0 --headless True --useragent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 fi
