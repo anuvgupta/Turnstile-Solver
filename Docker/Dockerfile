@@ -44,12 +44,15 @@ RUN apt-get update && \
     apt-get install -y ./google-chrome-stable_current_amd64.deb && \
     rm ./google-chrome-stable_current_amd64.deb
 
-COPY ./run.sh /usr/bin/
+COPY Docker/run.sh /usr/bin/
 RUN chmod +x /usr/bin/run.sh
 
-COPY ../*.py /app/
-COPY ../requirements.txt /app/
-COPY ../proxies.txt /app/
+COPY api_solver.py /app/
+COPY async_solver.py /app/
+COPY sync_solver.py /app/
+COPY main.py /app/
+COPY requirements.txt /app/
+COPY proxies.txt /app/
 
 EXPOSE 3389
 ENTRYPOINT ["/usr/bin/run.sh"]
