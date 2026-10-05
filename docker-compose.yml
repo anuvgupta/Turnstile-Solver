@@ -1,5 +1,6 @@
 # Turnstile Solver — Camoufox-based Cloudflare Turnstile bypass
-# Include this from piwii's compose.yaml or your media-stack compose.
+# Runs on seedlo (Unraid), cloned at /mnt/user/workspace/Turnstile-Solver.
+# Managed by Unraid Compose Manager via include from the media-stack compose.
 services:
   turnstile-solver:
     build:
