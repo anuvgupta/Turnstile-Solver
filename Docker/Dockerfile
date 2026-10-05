@@ -47,5 +47,9 @@ RUN apt-get update && \
 COPY ./run.sh /usr/bin/
 RUN chmod +x /usr/bin/run.sh
 
+COPY ../*.py /app/
+COPY ../requirements.txt /app/
+COPY ../proxies.txt /app/
+
 EXPOSE 3389
 ENTRYPOINT ["/usr/bin/run.sh"]
