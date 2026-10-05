@@ -204,21 +204,20 @@ class TurnstileAPIServer:
             if self.debug:
                 logger.debug(f"Browser {index}: Starting Turnstile interaction")
 
-            # Click the Turnstile widget and wait for the token
+            # Wait for Turnstile to auto-resolve without clicking
             token = None
-            for attempt in range(10):
+            for attempt in range(20):
                 try:
                     val = await page.input_value("[name=cf-turnstile-response]", timeout=2000)
                     if val == "":
                         if self.debug:
-                            logger.debug(f"Browser {index}: Attempt {attempt} - clicking Turnstile")
-                        await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
-                        await asyncio.sleep(0.5)
+                            logger.debug(f"Browser {index}: Attempt {attempt} - waiting for Turnstile auto-resolve")
+                        await asyncio.sleep(1.5)
                     else:
                         token = val
                         break
                 except Exception:
-                    pass
+                    await asyncio.sleep(1.5)
 
             if token:
                 # Wait for the page to update after Turnstile callback
