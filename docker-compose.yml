@@ -1,0 +1,21 @@
+# Turnstile Solver — Camoufox-based Cloudflare Turnstile bypass
+# Include this from piwii's compose.yaml or your media-stack compose.
+services:
+  turnstile-solver:
+    build:
+      context: .
+      dockerfile: Docker/Dockerfile
+    container_name: turnstile-solver
+    restart: unless-stopped
+    init: true
+    environment:
+      - RUN_API_SOLVER=true
+      - TZ=America/Chicago
+    labels:
+      autoheal: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-m", "5", "-o", "/dev/null", "http://localhost:5000/"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

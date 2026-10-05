@@ -73,5 +73,6 @@ if [ "$RUN_API_SOLVER" = "true" ]; then
     export DISPLAY=:99
     Xvfb $DISPLAY -screen 0 1920x1080x24 &>/dev/null &
     sleep 1
+    python3 -m camoufox fetch
     python3 /app/api_solver.py --browser_type camoufox --host 0.0.0.0 --headless False --debug True
 fi
