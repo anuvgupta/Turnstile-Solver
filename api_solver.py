@@ -221,7 +221,6 @@ class TurnstileAPIServer:
 
             if token:
                 # Wait for the page to update after Turnstile callback
-                # (typically a form submission that reloads the page)
                 post_start = time.time()
                 while time.time() - post_start < 30:
                     try:
@@ -232,8 +231,16 @@ class TurnstileAPIServer:
                         pass
                     await asyncio.sleep(1)
 
+                # Wait for download links to load (Vimm's injects them via JS)
+                dl_post_start = time.time()
+                page_content = ""
+                while time.time() - dl_post_start < 30:
+                    await asyncio.sleep(2)
+                    page_content = await page.content()
+                    if "/download/" in page_content:
+                        break
+
                 elapsed_time = round(time.time() - start_time, 3)
-                page_content = await page.content()
 
                 logger.success(f"Browser {index}: Solved in {elapsed_time}s")
 
