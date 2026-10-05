@@ -94,22 +94,16 @@ class TurnstileSolver:
             self.browser_args.append(f"--user-agent={useragent}")
 
     def _setup_page(self, browser, url: str, sitekey: str, action: str = None, cdata: str = None):
-        """Set up the page with Turnstile widget."""
+        """Navigate to the target URL instead of creating a synthetic page."""
         if self.browser_type == "chrome":
             page = browser.pages[0]
         else:
             page = browser.new_page()
 
-        url_with_slash = url + "/" if not url.endswith("/") else url
-
         if self.debug:
-            logger.debug(f"Navigating to URL: {url_with_slash}")
+            logger.debug(f"Navigating to URL: {url}")
 
-        turnstile_div = f'<div class="cf-turnstile" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
-        page_data = self.HTML_TEMPLATE.replace("<!-- cf turnstile -->", turnstile_div)
-
-        page.route(url_with_slash, lambda route: route.fulfill(body=page_data, status=200))
-        page.goto(url_with_slash)
+        page.goto(url)
 
         return page
 
@@ -138,9 +132,11 @@ class TurnstileSolver:
 
     def solve(self, url: str, sitekey: str, action: str = None, cdata: str = None):
         """
-        Solve the Turnstile challenge and return the result.
+        Solve the Turnstile challenge directly on the target page and return
+        the token along with the page content after the form callback.
         """
         start_time = time.time()
+        page_content = None
         if self.browser_type in ["chromium", "chrome", "msedge"]:
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(
@@ -154,6 +150,18 @@ class TurnstileSolver:
         try:
             page = self._setup_page(browser, url, sitekey, action, cdata)
             turnstile_value = self._get_turnstile_response(page)
+
+            if turnstile_value:
+                post_start = time.time()
+                while time.time() - post_start < 30:
+                    try:
+                        has_challenge = page.query_selector(".cf-turnstile")
+                        if not has_challenge:
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                page_content = page.content()
 
             elapsed_time = round(time.time() - start_time, 3)
 
@@ -180,7 +188,7 @@ class TurnstileSolver:
                 logger.debug(f"Elapsed time: {result.elapsed_time_seconds} seconds")
                 logger.debug("Browser closed. Returning result.")
 
-        return result
+        return result, page_content
 
 
 def get_turnstile_token(url: str, sitekey: str, action: str = None, cdata: str = None, debug: bool = False, headless: bool = False, useragent: str = None, browser_type: str = "chromium"):
@@ -196,8 +204,11 @@ def get_turnstile_token(url: str, sitekey: str, action: str = None, cdata: str =
         logger.error(f"You must specify a {COLORS.get('YELLOW')}User-Agent{COLORS.get('RESET')} for Turnstile Solver or use {COLORS.get('GREEN')}camoufox{COLORS.get('RESET')} without useragent")
     else:
         solver = TurnstileSolver(debug=debug, useragent=useragent, headless=headless, browser_type=browser_type)
-        result = solver.solve(url=url, sitekey=sitekey, action=action, cdata=cdata)
-        return result.__dict__
+        result, page_content = solver.solve(url=url, sitekey=sitekey, action=action, cdata=cdata)
+        result_dict = result.__dict__
+        if page_content:
+            result_dict["page_content"] = page_content
+        return result_dict
 
 
 

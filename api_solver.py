@@ -160,17 +160,22 @@ class TurnstileAPIServer:
 
 
     async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None):
-        """Solve the Turnstile challenge."""
+        """Solve the Turnstile challenge directly on the target page.
+
+        Unlike the upstream solver, this navigates to the real page instead of
+        creating a synthetic local page.  This preserves the origin context
+        that Cloudflare validates, and also waits for the page to update after
+        the Turnstile callback fires (e.g. a form submission), capturing the
+        resulting page content.
+        """
         proxy = None
 
         index, browser = await self.browser_pool.get()
 
         if self.proxy_support:
             proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
-
             with open(proxy_file_path) as proxy_file:
                 proxies = [line.strip() for line in proxy_file if line.strip()]
-
             proxy = random.choice(proxies) if proxies else None
 
             if proxy:
@@ -188,54 +193,63 @@ class TurnstileAPIServer:
             context = await browser.new_context()
 
         page = await context.new_page()
-
         start_time = time.time()
 
         try:
             if self.debug:
-                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Proxy: {proxy}")
-                logger.debug(f"Browser {index}: Setting up page data and route")
+                logger.debug(f"Browser {index}: Navigating to {url} (sitekey: {sitekey})")
 
-            url_with_slash = url + "/" if not url.endswith("/") else url
-            turnstile_div = f'<div class="cf-turnstile" style="background: white;" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
-            page_data = self.HTML_TEMPLATE.replace("<!-- cf turnstile -->", turnstile_div)
-
-            await page.route(url_with_slash, lambda route: route.fulfill(body=page_data, status=200))
-            await page.goto(url_with_slash)
+            await page.goto(url)
 
             if self.debug:
-                logger.debug(f"Browser {index}: Setting up Turnstile widget dimensions")
+                logger.debug(f"Browser {index}: Starting Turnstile interaction")
 
-            await page.eval_on_selector("//div[@class='cf-turnstile']", "el => el.style.width = '70px'")
-
-            if self.debug:
-                logger.debug(f"Browser {index}: Starting Turnstile response retrieval loop")
-
-            for _ in range(10):
+            # Click the Turnstile widget and wait for the token
+            token = None
+            for attempt in range(10):
                 try:
-                    turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=2000)
-                    if turnstile_check == "":
+                    val = await page.input_value("[name=cf-turnstile-response]", timeout=2000)
+                    if val == "":
                         if self.debug:
-                            logger.debug(f"Browser {index}: Attempt {_} - No Turnstile response yet")
-                        
+                            logger.debug(f"Browser {index}: Attempt {attempt} - clicking Turnstile")
                         await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
                         await asyncio.sleep(0.5)
                     else:
-                        elapsed_time = round(time.time() - start_time, 3)
-
-                        logger.success(f"Browser {index}: Successfully solved captcha - {COLORS.get('MAGENTA')}{turnstile_check[:10]}{COLORS.get('RESET')} in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
-
-                        self.results[task_id] = {"value": turnstile_check, "elapsed_time": elapsed_time}
-                        self._save_results()
+                        token = val
                         break
-                except:
+                except Exception:
                     pass
 
-            if self.results.get(task_id) == "CAPTCHA_NOT_READY":
+            if token:
+                # Wait for the page to update after Turnstile callback
+                # (typically a form submission that reloads the page)
+                post_start = time.time()
+                while time.time() - post_start < 30:
+                    try:
+                        has_challenge = await page.query_selector(".cf-turnstile")
+                        if not has_challenge:
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
+
+                elapsed_time = round(time.time() - start_time, 3)
+                page_content = await page.content()
+
+                logger.success(f"Browser {index}: Solved in {elapsed_time}s")
+
+                self.results[task_id] = {
+                    "value": token,
+                    "elapsed_time": elapsed_time,
+                    "page_content": page_content
+                }
+                self._save_results()
+            else:
                 elapsed_time = round(time.time() - start_time, 3)
                 self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
                 if self.debug:
-                    logger.error(f"Browser {index}: Error solving Turnstile in {COLORS.get('RED')}{elapsed_time}{COLORS.get('RESET')} Seconds")
+                    logger.error(f"Browser {index}: Failed to solve in {elapsed_time}s")
+
         except Exception as e:
             elapsed_time = round(time.time() - start_time, 3)
             self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
@@ -244,7 +258,6 @@ class TurnstileAPIServer:
         finally:
             if self.debug:
                 logger.debug(f"Browser {index}: Clearing page state")
-
             await context.close()
             await self.browser_pool.put((index, browser))
 
