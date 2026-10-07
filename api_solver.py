@@ -7,10 +7,23 @@ import random
 import logging
 import asyncio
 import argparse
+import subprocess
 from quart import Quart, request, jsonify
 from camoufox.async_api import AsyncCamoufox
 from patchright.async_api import async_playwright
 
+
+DISPLAY_MESSAGES = [
+    "cannot connect to X server",
+    "X11 connection rejected",
+    "Could not open display",
+    "DISPLAY is not set",
+    "Failed to open display",
+    "TargetClosedError",
+    "Protocol error",
+    "Connection closed",
+    "Browser closed",
+]
 
 COLORS = {
     'MAGENTA': '\033[35m',
@@ -92,6 +105,10 @@ class TurnstileAPIServer:
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
         self.browser_args = []
+        self._xvfb_display = os.environ.get("DISPLAY", ":99")
+        self._consecutive_failures = 0
+        self._browser_healthy = True
+        self._camoufox = None
         if useragent:
             self.browser_args.append(f"--user-agent={useragent}")
 
@@ -121,6 +138,7 @@ class TurnstileAPIServer:
         self.app.before_serving(self._startup)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/result', methods=['GET'])(self.get_result)
+        self.app.route('/health')(self.health)
         self.app.route('/')(self.index)
 
     async def _startup(self) -> None:
@@ -138,7 +156,7 @@ class TurnstileAPIServer:
         if self.browser_type in ['chromium', 'chrome', 'msedge']:
             playwright = await async_playwright().start()
         elif self.browser_type == "camoufox":
-            camoufox = AsyncCamoufox(headless=self.headless, humanize=True, geoip=True)
+            self._camoufox = AsyncCamoufox(headless=self.headless, humanize=True, geoip=True)
 
         for _ in range(self.thread_count):
             if self.browser_type in ['chromium', 'chrome', 'msedge']:
@@ -149,7 +167,7 @@ class TurnstileAPIServer:
                 )
 
             elif self.browser_type == "camoufox":
-                browser = await camoufox.start()
+                browser = await self._camoufox.start()
 
             await self.browser_pool.put((_+1, browser))
 
@@ -158,6 +176,79 @@ class TurnstileAPIServer:
 
         logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
 
+
+    async def _check_xvfb(self) -> bool:
+        if self.headless:
+            return True
+        try:
+            result = subprocess.run(
+                ["xdpyinfo", "-display", self._xvfb_display],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    async def _check_browser(self, index: int, browser) -> bool:
+        try:
+            page = await browser.new_page()
+            await page.goto("about:blank", timeout=5000)
+            await page.close()
+            return True
+        except Exception:
+            self._browser_healthy = False
+            return False
+
+    async def _recover_display(self) -> bool:
+        if self.headless:
+            return True
+        logger.warning("Attempting Xvfb recovery")
+        try:
+            subprocess.run(["pkill", "-f", f"Xvfb {self._xvfb_display}"],
+                          capture_output=True, timeout=5)
+            await asyncio.sleep(1)
+            subprocess.Popen(
+                ["Xvfb", self._xvfb_display, "-screen", "0", "1920x1080x24"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            await asyncio.sleep(1)
+            if await self._check_xvfb():
+                logger.success("Xvfb recovered successfully")
+                await self._reinitialize_browsers()
+                return True
+            logger.error("Xvfb recovery failed — display still dead")
+            return False
+        except Exception as e:
+            logger.error(f"Xvfb recovery error: {e}")
+            return False
+
+    async def _reinitialize_browsers(self) -> None:
+        while not self.browser_pool.empty():
+            try:
+                _, old_browser = self.browser_pool.get_nowait()
+                try:
+                    await old_browser.close()
+                except Exception:
+                    pass
+            except asyncio.QueueEmpty:
+                break
+        await self._initialize_browser()
+        self._browser_healthy = True
+        self._consecutive_failures = 0
+
+    async def _replace_browser(self, index: int) -> bool:
+        try:
+            if self.browser_type == "camoufox" and self._camoufox:
+                browser = await self._camoufox.start()
+                await self.browser_pool.put((index, browser))
+                return True
+        except Exception as e:
+            logger.error(f"Failed to replace browser {index}: {e}")
+        return False
+
+    async def _is_display_error(self, error: Exception) -> bool:
+        msg = str(error).lower()
+        return any(pattern.lower() in msg for pattern in DISPLAY_MESSAGES)
 
     async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None, wait_selector: str = None):
         """Solve the Turnstile challenge directly on the target page.
@@ -197,6 +288,7 @@ class TurnstileAPIServer:
 
         page = await context.new_page()
         start_time = time.time()
+        skip_pool_return = False
 
         try:
             if self.debug:
@@ -277,13 +369,34 @@ class TurnstileAPIServer:
         except Exception as e:
             elapsed_time = round(time.time() - start_time, 3)
             self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
+            error_msg = str(e)
             if self.debug:
-                logger.error(f"Browser {index}: Error solving Turnstile: {str(e)}")
+                logger.error(f"Browser {index}: Error solving Turnstile: {error_msg}")
+
+            if await self._is_display_error(e):
+                self._browser_healthy = False
+                self._consecutive_failures += 1
+                skip_pool_return = True
+                logger.error(f"Browser {index}: Display error detected ({self._consecutive_failures} consecutive)")
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                if self._consecutive_failures >= 2:
+                    logger.warning("Multiple display failures — triggering display recovery")
+                    if await self._recover_display():
+                        logger.success("Display recovery succeeded")
+                    else:
+                        logger.error("Display recovery failed — container will report unhealthy")
+                        self._browser_healthy = False
+                else:
+                    await self._replace_browser(index)
         finally:
             if self.debug:
                 logger.debug(f"Browser {index}: Clearing page state")
             await context.close()
-            await self.browser_pool.put((index, browser))
+            if not skip_pool_return and self._browser_healthy:
+                await self.browser_pool.put((index, browser))
 
     async def process_turnstile(self):
         """Handle the /turnstile endpoint requests."""
@@ -329,6 +442,19 @@ class TurnstileAPIServer:
             status_code = 422
 
         return result, status_code
+
+    async def health(self):
+        xvfb_ok = await self._check_xvfb()
+        pool_size = self.browser_pool.qsize()
+        healthy = xvfb_ok and self._browser_healthy and pool_size > 0
+        status_code = 200 if healthy else 503
+        return jsonify({
+            "status": "healthy" if healthy else "unhealthy",
+            "xvfb": xvfb_ok,
+            "browser_pool": pool_size,
+            "browser_healthy": self._browser_healthy,
+            "consecutive_failures": self._consecutive_failures,
+        }), status_code
 
     @staticmethod
     async def index():
